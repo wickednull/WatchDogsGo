@@ -340,9 +340,14 @@ class GpsReader:
                     self.state.track_deg = _as_float(obj.get("track"))
                     if time_str:
                         self.state.utc_iso = time_str
-                    # require min_sats for a "good" 3D fix
-                    self.state.fix_3d = (
-                        mode == 3 and self.state.sats >= self.min_sats
+                    # A 2D fix is a perfectly good position for wardriving;
+                    # altitude is not used. Satellite counts only exist when
+                    # gpsd has GSV/GGA reports — phone bridges such as
+                    # Mobile2GPS send GPRMC alone, so sats == 0 means "not
+                    # reported", not "no satellites in view".
+                    self.state.fix_3d = mode >= 2 and (
+                        self.state.sats == 0
+                        or self.state.sats >= self.min_sats
                     )
                     self.state._record(now, self.state.lat, self.state.lon,
                                        self.state.alt_m, self.state.accuracy_m,
@@ -364,9 +369,12 @@ class GpsReader:
             n_used = len(used) if used else obj.get("uSat", 0)
             with self.state.lock:
                 self.state.sats = int(n_used)
-                # re-evaluate fix_3d with updated sat count
-                if self.state.fix_quality == 3:
-                    self.state.fix_3d = self.state.sats >= self.min_sats
+                # re-evaluate with the updated sat count
+                if self.state.fix_quality >= 2:
+                    self.state.fix_3d = (
+                        self.state.sats == 0
+                        or self.state.sats >= self.min_sats
+                    )
 
 
 def _as_float(value) -> float:

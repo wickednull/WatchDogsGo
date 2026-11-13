@@ -399,12 +399,13 @@ class App:
         def live_msg() -> str:
             s = self.gps.state.snapshot()
             dev = s.device or "(no device)"
-            fq_label = {0: "no fix", 1: "GPS", 2: "DGPS", 4: "RTK fix", 5: "RTK float"}.get(
-                s.fix_quality, f"fq{s.fix_quality}")
+            fq_label = {0: "no fix", 1: "no fix", 2: "2D", 3: "3D"}.get(
+                s.fix_quality, f"mode {s.fix_quality}")
+            sats = str(s.sats) if s.sats else "n/a"
             return (f"Waiting for GPS fix.\n"
                     f"dev: {dev}\n"
-                    f"sats: {s.sats}   {fq_label}\n"
-                    f"need >= {self.gps.min_sats} sats + 3D fix\n"
+                    f"sats: {sats}   {fq_label}\n"
+                    f"need a position fix (2D or 3D)\n"
                     f"\nphone: CONFIG > PHONE GPS\n"
                     f"B to cancel")
 

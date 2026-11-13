@@ -94,7 +94,7 @@ def render(p, pal: Palette, st: HudState) -> None:
                         f"{st.gps_accuracy:.0f}m", pal.green, FONT_BODY)
         else:
             p.draw_text(6 + p.text_width("FIX", FONT_HUGE) + 12, midy + 24,
-                        str(st.gps_sats), pal.green, FONT_BODY)
+                        str(st.gps_sats) if st.gps_sats else "n/a", pal.green, FONT_BODY)
         p.draw_text(14, midy + 44, f"{st.lat:.4f}", pal.fg, FONT_HINT)
         p.draw_text(14, midy + 56, f"{st.lon:.4f}", pal.fg, FONT_HINT)
     else:
