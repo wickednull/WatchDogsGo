@@ -67,11 +67,27 @@ fi
 
 echo "[bootstrap] opkg runtime packages (best-effort, needs internet)"
 opkg update >/dev/null 2>&1 || true
-for pkg in iw bluez-utils kmod-usb-acm gpsd gpsd-clients tcpdump-mini; do
+for pkg in iw bluez-utils bluez-daemon kmod-bluetooth kmod-btusb \
+           rfkill kmod-usb-acm gpsd gpsd-clients tcpdump-mini; do
     opkg list-installed 2>/dev/null | grep -q "^$pkg " \
         || opkg install "$pkg" >/dev/null 2>&1 \
         || echo "  warn: could not install $pkg"
 done
+
+# A USB dongle is useless without kmod-btusb, and bluetoothctl scans are
+# silently empty when bluetoothd is not running (common after firmware
+# upgrades), so bring the daemon up once during setup.
+if command -v bluetoothctl >/dev/null 2>&1; then
+    if ! pidof bluetoothd >/dev/null 2>&1; then
+        service bluetoothd restart >/dev/null 2>&1 || \
+            service bluetoothd start >/dev/null 2>&1 || true
+    fi
+    if pidof bluetoothd >/dev/null 2>&1; then
+        echo "  bluetoothd running"
+    else
+        echo "  warn: bluetoothd not running (BLE scans will fail)"
+    fi
+fi
 
 mkdir -p /mmc/root/loot/wdgwars/sessions
 

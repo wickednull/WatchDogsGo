@@ -5,6 +5,7 @@
   },
   "scan": {
     "wifi_iface": "auto",
+    "ble_iface": "auto",
     "band_plan": [
       "2g",
       "5g_fast",

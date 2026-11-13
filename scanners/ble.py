@@ -33,12 +33,33 @@ _DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s*(.*)?")
 # Prefer the parenthesised signed decimal, fall back to the first signed int.
 _RSSI_RE = re.compile(r"RSSI:[^(\n]*\((-?\d+)\)|RSSI:\s*(-?\d+)")
 _NAME_RE = re.compile(r"Name:\s*(.+)")
+_CONTROLLER_RE = re.compile(r"Controller\s+([0-9A-Fa-f:]{17})")
+
+
+def _list_adapters() -> list[str]:
+    """hciN adapters present in sysfs, lowest index first."""
+    try:
+        names = os.listdir("/sys/class/bluetooth")
+    except OSError:
+        return []
+    out = [n for n in names if n.startswith("hci")]
+    return sorted(out, key=lambda n: int(n[3:]) if n[3:].isdigit() else 99)
+
+
+def _cmd(cmd: list[str], timeout: float = 4.0) -> tuple[int, str]:
+    """Best-effort helper for the preflight commands."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
 
 
 class BleScanner:
     """Run bluetoothctl with a pty-less pipe and parse live updates."""
 
-    def __init__(self, hci: str = "hci0", interval_s: float = 12.0,
+    def __init__(self, hci: str = "auto", interval_s: float = 12.0,
                  emit_interval_s: float = 1.0, queue_max: int = 256) -> None:
         self.hci = hci
         self.interval = interval_s
@@ -49,17 +70,69 @@ class BleScanner:
         self._proc: subprocess.Popen | None = None
         self._master_fd: int | None = None
         self._pending: dict[str, BleObs] = {}
+        self._controller: str | None = None
         self.last_error: str | None = None
         self.available: bool = False
         self.events: int = 0
         self.dropped_batches: int = 0
 
+    def _preflight(self) -> str | None:
+        """Get the Bluetooth stack into a usable state.
+
+        Returns None when an adapter is powered and bluetoothd answered, or a
+        short human-readable error otherwise. Without this, `bluetoothctl`
+        fails silently and the HUD just shows zero BLE hits: the daemon is not
+        always running on the Pager, a USB dongle needs its kernel module, and
+        rfkill soft-blocks survive reboots.
+        """
+        adapters = _list_adapters()
+        if not adapters:
+            for mod in ("bluetooth", "btusb"):
+                _cmd(["modprobe", mod])
+            time.sleep(0.6)
+            adapters = _list_adapters()
+        if not adapters:
+            return "no adapter (kmod-bluetooth/kmod-btusb?)"
+
+        rc, out = _cmd(["rfkill", "list", "bluetooth"])
+        if rc == 0 and "blocked: yes" in out.lower():
+            _cmd(["rfkill", "unblock", "bluetooth"])
+            time.sleep(0.3)
+
+        if _cmd(["pidof", "bluetoothd"])[0] != 0:
+            for cmd in (["service", "bluetoothd", "restart"],
+                        ["service", "bluetoothd", "start"],
+                        ["bluetoothd"]):
+                _cmd(cmd, timeout=4)
+                if _cmd(["pidof", "bluetoothd"])[0] == 0:
+                    break
+                time.sleep(0.3)
+            if _cmd(["pidof", "bluetoothd"])[0] != 0:
+                return "bluetoothd not running"
+
+        want = (self.hci or "auto").strip()
+        if want in ("", "auto") or want not in adapters:
+            want = adapters[0]
+        self.hci = want
+        if shutil.which("hciconfig"):
+            _cmd(["hciconfig", want, "up"])
+
+        rc, out = _cmd(["bluetoothctl", "list"], timeout=6)
+        m = _CONTROLLER_RE.search(out)
+        if rc != 0 or not m:
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            return (f"no controller ({lines[-1][:44]})" if lines
+                    else "no controller")
+        self._controller = m.group(1)
+        return None
+
     def start(self) -> None:
+        self.last_error = None
         if not shutil.which("bluetoothctl"):
             self.last_error = "`bluetoothctl` not installed (opkg install bluez-utils)"
             return
-        if not os.path.exists(f"/sys/class/bluetooth/{self.hci}"):
-            self.last_error = f"{self.hci} not present"
+        self.last_error = self._preflight()
+        if self.last_error:
             return
         self.available = True
         self._stop.clear()
@@ -135,6 +208,10 @@ class BleScanner:
             self.last_error = f"spawn: {e}"
             return
         try:
+            if self._controller:
+                os.write(master_fd,
+                         f"select {self._controller}\n".encode())
+                time.sleep(0.15)
             # Disable every bluez discovery filter so we see raw-like LE
             # advertising traffic instead of the heavily-deduped default.
             # Without these, bluetoothctl only emits RSSI for a fresh or
@@ -185,6 +262,13 @@ class BleScanner:
                 line = _strip_ansi(raw.decode(errors="replace")).strip()
                 if not line:
                     continue
+                low = line.lower()
+                if ("no default controller" in low
+                        or "failed to set power" in low
+                        or "org.bluez.error" in low
+                        or "unable to open" in low
+                        or "blocked" in low):
+                    self.last_error = line[:70]
                 d = _DEVICE_RE.search(line)
                 if d:
                     current_mac = d.group(1).lower()
@@ -216,6 +300,10 @@ class BleScanner:
                                 mac=prev.mac, name=names_now,
                                 rssi=prev.rssi, first_seen=prev.first_seen,
                             )
+        if not self._stop.is_set() and self._proc is not None:
+            rc = self._proc.poll()
+            if rc:
+                self.last_error = self.last_error or f"bluetoothctl exited ({rc})"
         # Hand over whatever the last partial window collected.
         self._flush()
 

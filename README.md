@@ -18,7 +18,9 @@ asking first.
 - **Two WiFi capture backends.** Passive monitor-mode beacon capture when a
   monitor interface is available, `iw dev … scan` with rotating band passes
   otherwise.
-- **BLE LE capture** via `bluetoothctl` under a pty (async `[CHG] RSSI` events).
+- **BLE LE capture** via `bluetoothctl` under a pty (async `[CHG] RSSI` events),
+  auto-selecting an adapter and starting `bluetoothd` / clearing rfkill blocks
+  when they get in the way.
 - **Movement-aware deduplication.** A row is written for a new BSSID, after you
   have moved far enough for the sighting to add information, or when the signal
   got materially stronger.
@@ -44,7 +46,7 @@ asking first.
 | pagerctl | `pagerctl.py` + `libpagerctl.so` (bootstrap copies them from WiFMan or downloads them) |
 | GPS | `gpsd` + `gpsd-clients` (bootstrap installs them) |
 | WiFi | `iw`; `tcpdump-mini` for the monitor-mode backend |
-| BLE | `bluez-utils` |
+| BLE | `bluez-utils` + `bluez-daemon`; `kmod-bluetooth` / `kmod-btusb` for the radio and USB dongles |
 | Network | Internet only for uploads and first-time package/GPS-binary downloads |
 
 ## Install
@@ -166,6 +168,7 @@ MAIN MENU
 │   ├── TEST CONNECTION
 │   ├── SCAN SETUP
 │   │   ├── WIFI SOURCE       auto / force monitor / force iw / pick interface
+│   │   ├── BLE SOURCE        auto / hci0 / hci1 / ...
 │   │   ├── BAND PLAN         rotate / 2.4 only / 2.4+5 / full sweep
 │   │   ├── MONITOR HOP
 │   │   ├── MOVE FILTER +/-
@@ -204,6 +207,7 @@ used automatically.
 | `api_key` | `""` | wdgwars.pl API key |
 | `gps.min_sats` | `4` | Minimum satellites **when reported**; ignored for phone feeds |
 | `scan.wifi_iface` | `"auto"` | `auto`, `monitor`, `scan`, or an interface name |
+| `scan.ble_iface` | `"auto"` | BLE adapter: `auto` or `hci0`/`hci1`/… |
 | `scan.band_plan` | rotate plan | Band sequence used by `iw scan` |
 | `scan.wifi_interval_s` | `0` | Pause between band passes; `0` = as fast as possible |
 | `scan.flush_bss_cache` | `true` | Purge the kernel BSS cache so results are fresh |
@@ -243,6 +247,7 @@ used automatically.
 | `=== WDGoWars FILES MISSING ===` | The folder is a partial copy — copy `wdgwars.py`, `scanners/`, `ui/`, `storage/`, `uploader/`, `config.json` |
 | Payload exits immediately | The last 8 lines of `/tmp/wdgwars.err` are printed on screen; the full file stays for SSH |
 | Endless `Waiting for GPS fix` | `gpspipe -w -n 5`: no TPV → gpsd/Mobile2GPS; `mode:2` with lat/lon → feed is fine |
+| BLE sees 0 devices | `hciconfig -a`, `pidof bluetoothd`; `service bluetoothd restart`; USB dongle → `opkg install kmod-btusb`; `rfkill unblock bluetooth`; pick the adapter in **SCAN SETUP → BLE SOURCE** |
 | `client sent an http request to a https server` | Use `https://<pager-ip>:1993`, not `http://` |
 | Mobile2GPS "not found" but installed | It is discovered by folder name anywhere under `/root/payloads` or `/mmc/root/payloads`; check with `find / -iname '*mobile2gps*'` |
 | Mobile2GPS exits at start | Needs Pager firmware 2.0.0+ (`GPS_CONFIGURE`) |

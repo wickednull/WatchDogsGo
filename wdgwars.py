@@ -500,7 +500,7 @@ class App:
                              "the phone GPS link is in use.",
                              accent=self.pal.amber)
         if use_ble:
-            ble = BleScanner("hci0",
+            ble = BleScanner(scan_cfg.get("ble_iface", "auto"),
                              interval_s=scan_cfg.get("ble_interval_s", 12),
                              emit_interval_s=float(scan_cfg.get("emit_interval_s", 1.0)))
             ble.start()
@@ -510,7 +510,7 @@ class App:
                          f"WiFi disabled:\n{wifi.last_error}", accent=self.pal.amber)
         if ble and not ble.available:
             dialog.alert(self.p, self.pal, "BLE",
-                         f"BLE disabled:\n{ble.last_error or 'hci0 missing'}",
+                         f"BLE disabled:\n{ble.last_error or 'no adapter'}",
                          accent=self.pal.amber)
 
         sess = Session(
@@ -585,6 +585,8 @@ class App:
                     st.rows_per_min = _rows_per_min(rate_hist)
 
                 warn = getattr(wifi, "last_error", None) if wifi else None
+                if not warn and ble:
+                    warn = getattr(ble, "last_error", None)
                 st.warn = warn or ""
 
                 # Render & flip only when the backlight is on and something
@@ -900,6 +902,8 @@ class App:
             return [
                 menu.MenuItem("WIFI SOURCE", action=lambda: self._cfg_wifi_source(),
                               badge=str(sc.get("wifi_iface", "auto"))),
+                menu.MenuItem("BLE SOURCE", action=lambda: self._cfg_ble_source(),
+                              badge=str(sc.get("ble_iface", "auto"))),
                 menu.MenuItem("BAND PLAN", action=lambda: self._cfg_cycle_band(),
                               badge=plan_name),
                 menu.MenuItem("MONITOR HOP", action=lambda: self._cfg_toggle("monitor_hop", True),
@@ -949,6 +953,29 @@ class App:
         mode, iface, why = pick_wifi_source(value)
         dialog.alert(self.p, self.pal, "WIFI SOURCE",
                      f"{value}\n\n-> {iface} ({mode})\n{why}",
+                     accent=self.pal.cyan)
+        return "back"
+
+    def _cfg_ble_source(self):
+        """Cycle auto -> hci0 -> hci1 -> ... for the BLE adapter."""
+        sc = self.cfg.setdefault("scan", {})
+        try:
+            adapters = sorted(
+                (n for n in os.listdir("/sys/class/bluetooth")
+                 if n.startswith("hci")),
+                key=lambda n: int(n[3:]) if n[3:].isdigit() else 99)
+        except OSError:
+            adapters = []
+        options = ["auto"] + adapters
+        cur = sc.get("ble_iface", "auto")
+        if cur not in options:
+            options.append(cur)
+        sc["ble_iface"] = options[(options.index(cur) + 1) % len(options)]
+        save_config(self.cfg)
+        dialog.alert(self.p, self.pal, "BLE SOURCE",
+                     f"Set to: {sc['ble_iface']}\n\n"
+                     f"adapters: {', '.join(adapters) or 'none'}\n"
+                     "Takes effect on the next scan.",
                      accent=self.pal.cyan)
         return "back"
 
