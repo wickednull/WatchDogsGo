@@ -15,6 +15,21 @@ WIFMAN_LIB="$WIFMAN_DIR/lib"
 
 mkdir -p "$LIB"
 
+echo "[bootstrap] payload tree"
+_tmp_missing=0
+for f in wdgwars.py handoff.py config.json \
+         scanners/gps.py scanners/wifi.py ui/menu.py ui/theme.py \
+         storage/session.py uploader/wdgwars.py; do
+    if [ ! -f "$PAYLOAD_DIR/$f" ]; then
+        echo "  warn: missing $f"
+        _tmp_missing=1
+    fi
+done
+if [ "$_tmp_missing" = 1 ]; then
+    echo "  This folder is an incomplete copy."
+    echo "  Copy the whole payload folder, not just the scripts."
+fi
+
 echo "[bootstrap] pagerctl bindings"
 # Look for an existing pagerctl pair anywhere a payload install keeps it.
 # pagerctl.py loads libpagerctl.so from its own directory, so we need a dir

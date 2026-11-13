@@ -7,15 +7,48 @@
 # Library: libpagerctl.so (pagerctl)
 
 PAYLOAD_DIR_DEFAULT="/root/payloads/user/reconnaissance/wdgwars"
-# Resolve the install dir from this script's own location first. Payloads are
-# frequently installed under a versioned/renamed folder (wdgwars-1.2.4, etc.);
-# hardcoding the canonical path made bootstrap.sh populate lib/ in the real
-# directory while payload.sh looked somewhere else and cried "missing".
+MMC_PAYLOAD_DIR_DEFAULT="/mmc/root/payloads/user/reconnaissance/wdgwars"
 _SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-if [ -n "$_SCRIPT_DIR" ] && [ -f "$_SCRIPT_DIR/payload.sh" ]; then
-    PAYLOAD_DIR="$_SCRIPT_DIR"
-else
-    PAYLOAD_DIR="${WDGWARS_PAYLOAD_DIR:-$PAYLOAD_DIR_DEFAULT}"
+
+# Pick the directory that actually holds the app. A payload.sh copied on its
+# own into a stale or partial folder must not shadow the real install, and a
+# renamed/versioned install must still be found.
+PAYLOAD_DIR=""
+for _cand in "$_SCRIPT_DIR" "${WDGWARS_PAYLOAD_DIR:-}" \
+             "$PAYLOAD_DIR_DEFAULT" "$MMC_PAYLOAD_DIR_DEFAULT"; do
+    if [ -n "$_cand" ] && [ -f "$_cand/wdgwars.py" ]; then
+        PAYLOAD_DIR="$_cand"
+        break
+    fi
+done
+if [ -z "$PAYLOAD_DIR" ]; then
+    # Any installed copy we did not guess above (versioned folder names).
+    for _cand in /root/payloads/user/reconnaissance/*/wdgwars.py \
+                 /mmc/root/payloads/user/reconnaissance/*/wdgwars.py; do
+        if [ -f "$_cand" ]; then
+            PAYLOAD_DIR="$(dirname "$_cand")"
+            break
+        fi
+    done
+fi
+# Nothing found: stay where payload.sh is, so the error names that folder.
+PAYLOAD_DIR="${PAYLOAD_DIR:-${_SCRIPT_DIR:-$PAYLOAD_DIR_DEFAULT}}"
+
+if [ ! -f "$PAYLOAD_DIR/wdgwars.py" ]; then
+    LOG ""
+    LOG "red" "=== WDGoWars FILES MISSING ==="
+    LOG ""
+    LOG "payload.sh is running from:"
+    LOG "  $PAYLOAD_DIR"
+    LOG ""
+    LOG "but wdgwars.py is not there."
+    LOG "Copy the whole payload folder - wdgwars.py,"
+    LOG "scanners/, ui/, storage/, uploader/, config.json -"
+    LOG "not just payload.sh."
+    LOG ""
+    LOG "Press any button to exit..."
+    WAIT_FOR_INPUT >/dev/null 2>&1
+    exit 1
 fi
 
 WIFMAN_DIR="/root/payloads/user/reconnaissance/wifman"
