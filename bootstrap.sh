@@ -98,6 +98,6 @@ else
 fi
 
 echo "[bootstrap] done"
-echo "[bootstrap] GPS: plug in a USB dongle, or install the Mobile2GPS"
-echo "            payload (Pager Portal > Get Payloads > general) for"
-echo "            phone GPS. WDGoWars then reads gpsd either way."
+echo "[bootstrap] GPS: plug in a USB dongle, or use the Mobile2GPS"
+echo "            payload for phone GPS (github.com/ryanpohlner/"
+echo "            wifipineapplepager-payloads, general/mobile2gps)."

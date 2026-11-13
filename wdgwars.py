@@ -57,30 +57,206 @@ def save_config(cfg: dict) -> None:
 # page and feeds gpsd, and this app only reads gpsd. Running a second HTTPS
 # bridge here duplicated that and pulled in python3-openssl/python3-urllib,
 # which this payload does not install.
-MOBILE2GPS_BINARIES = (
-    "/root/payloads/user/general/Mobile2GPS/Mobile2GPS",
-    "/mmc/root/payloads/user/general/Mobile2GPS/Mobile2GPS",
+#
+# The portal installs the repository folder name as-is (`mobile2gps`), while
+# the binary inside it is `Mobile2GPS`, so discovery must be case-insensitive
+# and must not assume the category.
+# Mobile2GPS is not published in the Pager Portal yet; it is installed by
+# copying the payload folder from
+# https://github.com/ryanpohlner/wifipineapplepager-payloads
+# (library/user/general/mobile2gps), so discovery must cope with manual
+# layouts: any category, any capitalisation, a versioned folder name, or a
+# whole clone of the payloads repository.
+MOBILE2GPS_ROOTS = (
+    "/root/payloads/user",
+    "/mmc/root/payloads/user",
 )
-MOBILE2GPS_URL = "https://172.16.52.1:1993"
+MOBILE2GPS_DEEP_ROOTS = (
+    "/root/payloads",
+    "/mmc/root/payloads",
+)
+MOBILE2GPS_PORT = 1993
+_M2G_CACHE: dict = {"t": 0.0, "binary": None, "installed": False, "ttl": 5.0}
 
 
-def _mobile2gps_binary() -> str | None:
-    for path in MOBILE2GPS_BINARIES:
-        if os.access(path, os.X_OK):
-            return path
+def _m2g_norm(name: str) -> str:
+    return name.lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _m2g_is_payload_dir(name: str) -> bool:
+    return _m2g_norm(name).startswith("mobile2gps")
+
+
+def _iter_mobile2gps_dirs():
+    """Yield installed Mobile2GPS directories, whatever the manual layout."""
+    seen: set[str] = set()
+
+    def _emit(path: str):
+        real = os.path.realpath(path)
+        if real in seen:
+            return None
+        seen.add(real)
+        return path
+
+    # Fast path: <root>/<category>/<payload>
+    for root in MOBILE2GPS_ROOTS:
+        try:
+            categories = os.listdir(root)
+        except OSError:
+            continue
+        for cat in categories:
+            cat_dir = os.path.join(root, cat)
+            if _m2g_is_payload_dir(cat):
+                out = _emit(cat_dir)
+                if out:
+                    yield out
+                continue
+            try:
+                names = os.listdir(cat_dir)
+            except OSError:
+                continue
+            for name in names:
+                if _m2g_is_payload_dir(name):
+                    out = _emit(os.path.join(cat_dir, name))
+                    if out:
+                        yield out
+
+    # Slow path: a clone of the payloads repo can nest it deeper, e.g.
+    # <root>/user/wifipineapplepager-payloads/library/user/general/mobile2gps
+    skip = {"__pycache__", "node_modules", "loot", "tmp"}
+    for root in MOBILE2GPS_DEEP_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, _files in os.walk(root):
+            rel = os.path.relpath(dirpath, root)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth >= 8:
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in skip]
+            for name in list(dirnames):
+                if _m2g_is_payload_dir(name):
+                    found = os.path.join(dirpath, name)
+                    dirnames.remove(name)          # no need to descend it
+                    out = _emit(found)
+                    if out:
+                        yield out
+
+
+def _binary_in(directory: str) -> str | None:
+    """The Mobile2GPS executable inside *directory*, if present."""
+    for sub in ("", "bin"):
+        path_dir = os.path.join(directory, sub) if sub else directory
+        try:
+            names = os.listdir(path_dir)
+        except OSError:
+            continue
+        for name in names:
+            if not _m2g_norm(name).startswith("mobile2gps"):
+                continue
+            path = os.path.join(path_dir, name)
+            if not os.path.isfile(path):
+                continue
+            if os.access(path, os.X_OK):
+                return path
+            # Payload copied by hand may have lost the exec bit.
+            try:
+                os.chmod(path, 0o755)
+                return path
+            except OSError:
+                continue
     return None
 
 
+def _m2g_probe(force: bool = False) -> tuple[str | None, bool]:
+    """(binary path, payload installed) with a short cache.
+
+    The scan touches the payload tree, so menu redraws must not repeat it.
+    A miss is cached longer than a hit; the PHONE GPS action forces a rescan
+    so downloading the binary and coming straight back works immediately.
+    """
+    now = time.time()
+    if not force and now - _M2G_CACHE["t"] < _M2G_CACHE["ttl"]:
+        return _M2G_CACHE["binary"], _M2G_CACHE["installed"]
+    binary = None
+    installed = False
+    for directory in _iter_mobile2gps_dirs():
+        installed = True
+        binary = _binary_in(directory)
+        if binary:
+            break
+    _M2G_CACHE.update(t=now, binary=binary, installed=installed,
+                      ttl=5.0 if binary else 30.0)
+    return binary, installed
+
+
+def _mobile2gps_binary() -> str | None:
+    return _m2g_probe()[0]
+
+
+def _mobile2gps_installed() -> bool:
+    return _m2g_probe()[1]
+
+
 def _mobile2gps_running() -> bool:
-    for tool in ("pidof", "pgrep"):
-        try:
-            return subprocess.run([tool, "Mobile2GPS"],
-                                  stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL,
-                                  timeout=2).returncode == 0
-        except (OSError, subprocess.SubprocessError):
+    """True when a Mobile2GPS server process is alive (any install path).
+
+    Matches /proc/<pid>/comm, not cmdline: a shell whose command line merely
+    mentions mobile2gps must not count as a running server.
+    """
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return False
+    for pid in pids:
+        if not pid.isdigit():
             continue
+        try:
+            with open(os.path.join("/proc", pid, "comm"),
+                      "r", errors="ignore") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            continue
+        if _m2g_norm(comm).startswith("mobile2gps"):
+            return True
     return False
+
+
+def _mobile2gps_url() -> str:
+    """Pairing URL using the Pager IP a phone on the Management AP can reach.
+
+    Measured per call: the management address can change between starts, and
+    Mobile2GPS listens on every interface anyway.
+    """
+    best_ip, best_score = "", -1
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        iface = parts[1].rstrip(":")
+        addr = parts[3].split("/")[0]
+        if addr.startswith(("127.", "169.254.")):
+            continue
+        score = 0
+        if iface.startswith(("br-lan", "brlan", "lan")):
+            score += 100
+        elif iface.startswith("br"):
+            score += 80
+        elif iface.startswith(("wlan", "wl", "ra", "ath")):
+            score += 40
+        elif iface.startswith(("eth", "usb", "en")):
+            score += 30
+        if addr.startswith(("172.16.52.", "172.16.42.")):
+            score += 50
+        if score > best_score:
+            best_ip, best_score = addr, score
+    return f"https://{best_ip or '172.16.52.1'}:{MOBILE2GPS_PORT}"
 
 
 def main() -> int:
@@ -678,7 +854,9 @@ class App:
             gps_devs = gps_cfg.get("devices", [])
             gps_current = gps_devs[0] if gps_devs else "AUTO"
             gps_baud = gps_cfg.get("baud", 9600)
-            phone_badge = "start" if _mobile2gps_binary() else "install"
+            phone_badge = ("start" if _mobile2gps_binary()
+                           else "setup" if _mobile2gps_installed()
+                           else "install")
             scan_cfg = self.cfg.get("scan", {})
             return [
                 menu.MenuItem(f"API KEY  [{masked}]", action=lambda: self._cfg_view_key()),
@@ -864,26 +1042,33 @@ class App:
         pairing URL. Keeping the bridge out of here means no second HTTPS
         server, no port 1993 conflict, and no python3-openssl dependency.
         """
+        binary, installed = _m2g_probe(force=True)
+        url = _mobile2gps_url()
+
         if _mobile2gps_running():
             dialog.alert(self.p, self.pal, "PHONE GPS",
                          "Mobile2GPS is running.\n\n"
-                         "1. Join the Management AP\n"
-                         "2. Open this URL on the phone:\n"
-                         f"   {MOBILE2GPS_URL}\n"
-                         "3. Accept the certificate warning\n"
-                         "4. Press Start and allow location\n\n"
-                         "Keep the page in the foreground.",
+                         "Join the Management AP, open\n"
+                         f"{url}\n\n"
+                         "Accept the cert warning and\n"
+                         "press Start. Keep the page open.",
                          accent=self.pal.green)
             return "back"
 
-        binary = _mobile2gps_binary()
         if not binary:
-            dialog.alert(self.p, self.pal, "PHONE GPS",
-                         "Mobile2GPS is not installed.\n\n"
-                         "Pager Portal > Payloads >\n"
-                         "Get Payloads > User Payloads >\n"
-                         "general > Mobile2GPS\n\n"
-                         "Requires Pager firmware 2.0.0+.",
+            if installed:
+                msg = ("Mobile2GPS is installed but\n"
+                       "its server binary is missing.\n\n"
+                       "Run its payload once (menu\n"
+                       "or `sh payload.sh` in its dir)\n"
+                       "to download it.")
+            else:
+                msg = ("Mobile2GPS not found.\n\n"
+                       "Install from\n"
+                       "github.com/ryanpohlner/\n"
+                       "wifipineapplepager-payloads\n"
+                       "(general/mobile2gps)")
+            dialog.alert(self.p, self.pal, "PHONE GPS", msg,
                          accent=self.pal.amber)
             return "back"
 
@@ -891,21 +1076,31 @@ class App:
                               "Start the Mobile2GPS server\nnow?"):
             return "back"
         try:
-            subprocess.Popen([binary], cwd=os.path.dirname(binary),
-                             stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+            proc = subprocess.Popen([binary], cwd=os.path.dirname(binary),
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
         except OSError as e:
             dialog.alert(self.p, self.pal, "PHONE GPS",
                          f"Could not start:\n{e}", accent=self.pal.red)
             return "back"
+        # Give it a moment: on firmware older than 2.0.0 it exits immediately
+        # because GPS_CONFIGURE is missing, and "Server starting" would lie.
+        time.sleep(0.6)
+        rc = proc.poll()
+        if rc not in (None, 0):
+            dialog.alert(self.p, self.pal, "PHONE GPS",
+                         f"Mobile2GPS exited ({rc}).\n\n"
+                         "It needs Pager firmware 2.0.0+.",
+                         accent=self.pal.red)
+            return "back"
         dialog.alert(self.p, self.pal, "PHONE GPS",
                      "Server starting.\n\n"
-                     "Join the Management AP, then open\n"
-                     f"{MOBILE2GPS_URL}\n\n"
-                     "Accept the certificate warning\n"
-                     "and press Start on the page.",
+                     "Join the Management AP, open\n"
+                     f"{url}\n\n"
+                     "Accept the cert warning and\n"
+                     "press Start.",
                      accent=self.pal.cyan)
         return "back"
 
