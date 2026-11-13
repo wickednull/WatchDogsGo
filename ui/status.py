@@ -32,6 +32,7 @@ class HudState:
     gps_fix: bool = False
     gps_sats: int = 0
     gps_accuracy: float = 0.0
+    gps_age_s: float = 0.0
     lat: float = 0.0
     lon: float = 0.0
     skipped_no_fix: int = 0
@@ -47,7 +48,8 @@ class HudState:
         """Cheap change-detector so the loop can skip identical redraws."""
         return (self.wifi_rows, self.ble_rows, self.total_rows,
                 self.wifi_seen, self.ble_seen, self.gps_fix, self.gps_sats,
-                round(self.gps_accuracy, 1), round(self.lat, 4),
+                round(self.gps_accuracy, 1), int(self.gps_age_s),
+                round(self.lat, 4),
                 round(self.lon, 4), self.skipped_no_fix,
                 int(self.rows_per_min), self.paused, self.warn)
 
@@ -87,14 +89,18 @@ def render(p, pal: Palette, st: HudState) -> None:
 
     # GPS cell
     if st.gps_fix:
-        p.draw_text(14, midy + 20, "FIX", pal.green, FONT_HUGE)
+        held = st.gps_age_s > 30
+        label = "HOLD" if held else "FIX"
+        color = pal.amber if held else pal.green
+        p.draw_text(14, midy + 20, label, color, FONT_HUGE)
         _acc_bars(p, pal, midx - 74, midy + 10, st.gps_accuracy)
+        value_x = 6 + p.text_width(label, FONT_HUGE) + 12
         if st.gps_accuracy > 0:
-            p.draw_text(6 + p.text_width("FIX", FONT_HUGE) + 12, midy + 24,
-                        f"{st.gps_accuracy:.0f}m", pal.green, FONT_BODY)
+            p.draw_text(value_x, midy + 24,
+                        f"{st.gps_accuracy:.0f}m", color, FONT_BODY)
         else:
-            p.draw_text(6 + p.text_width("FIX", FONT_HUGE) + 12, midy + 24,
-                        str(st.gps_sats) if st.gps_sats else "n/a", pal.green, FONT_BODY)
+            p.draw_text(value_x, midy + 24,
+                        str(st.gps_sats) if st.gps_sats else "n/a", color, FONT_BODY)
         p.draw_text(14, midy + 44, f"{st.lat:.4f}", pal.fg, FONT_HINT)
         p.draw_text(14, midy + 56, f"{st.lon:.4f}", pal.fg, FONT_HINT)
     else:

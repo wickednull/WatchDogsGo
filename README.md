@@ -15,6 +15,11 @@ asking first.
   HTTPS; a u-blox/Quectel serial stick works exactly as before.
 - **2D or 3D fix accepted.** Altitude is not used for wardriving, and phone
   feeds report no satellite count — a 2D fix with unknown sats is enough.
+- **No GPS timeout.** The last good fix is held through no-fix reports (phone
+  screen locked, browser paused), geo-tagging never expires it by default, and
+  the HUD switches from FIX to HOLD once that position is over 30 s old.
+- **Screen stays awake.** Idle dimming is off by default; re-enable it per
+  preference under CONFIG → KEEP AWAKE.
 - **Two WiFi capture backends.** Passive monitor-mode beacon capture when a
   monitor interface is available, `iw dev … scan` with rotating band passes
   otherwise.
@@ -34,7 +39,7 @@ asking first.
   confirmation because it drops the phone GPS link.
 - **App handoff** to Loki / PagerGotchi / WiFMan / Bjorn via the
   `exit 42 + data/.next_payload` protocol.
-- **Idle dim** after 20 s (configurable) to keep the Pager cool.
+- **Idle dim** optional (CONFIG → KEEP AWAKE, default off) for long sessions.
 
 ## Requirements
 
@@ -140,6 +145,14 @@ fix mode.
 so a real dongle with a weak constellation is still refused, while a phone feed
 is not.
 
+By default the last good fix is **never discarded**: if the phone locks its
+screen or the feed pauses, WDGoWars keeps using that position (GPS STATUS shows
+its age, and the HUD shows HOLD once it is over 30 s old). Set
+`gps.hold_last_fix_s` to a number of seconds to bound that (`0` disables
+holding), or `gps.max_gap_s` to make geo-tagging expire. Holding trades
+positional honesty for an uninterrupted wardrive — on a long stop it is worth
+re-checking the fix.
+
 ### Checking gpsd directly
 
 ```sh
@@ -176,6 +189,7 @@ MAIN MENU
 │   │   └── REQUIRE GPS FIX
 │   ├── GPS STATUS     live gpsd device, fix mode, sats, accuracy
 │   ├── PHONE GPS      start Mobile2GPS / show pairing URL
+│   ├── KEEP AWAKE     screen never dims (default on)
 │   ├── BRIGHTNESS +/-
 │   ├── IDLE TIMEOUT +/-
 │   └── DIM LEVEL +/-
@@ -206,6 +220,8 @@ used automatically.
 |---|---|---|
 | `api_key` | `""` | wdgwars.pl API key |
 | `gps.min_sats` | `4` | Minimum satellites **when reported**; ignored for phone feeds |
+| `gps.max_gap_s` | `0` | Max age for geo-tagging a sighting; `0` = never expire |
+| `gps.hold_last_fix_s` | `-1` | Keep the last fix through no-fix reports; `-1` = forever, `0` = off, `>0` = seconds |
 | `scan.wifi_iface` | `"auto"` | `auto`, `monitor`, `scan`, or an interface name |
 | `scan.ble_iface` | `"auto"` | BLE adapter: `auto` or `hci0`/`hci1`/… |
 | `scan.band_plan` | rotate plan | Band sequence used by `iw scan` |
@@ -227,8 +243,9 @@ used automatically.
 | `upload.mode` | `"auto"` | `auto`, `v1`, or `v2` |
 | `ui.brightness` | `70` | Backlight % |
 | `ui.rotation` | `270` | Panel rotation |
-| `ui.idle_timeout_s` | `20` | Dim after N seconds |
+| `ui.idle_timeout_s` | `20` | Dim after N seconds when KEEP AWAKE is off |
 | `ui.auto_dim_level` | `10` | Dim backlight % |
+| `ui.keep_awake` | `true` | Never dim/blank the screen |
 
 ## Files, uploads and handoff
 

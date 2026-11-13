@@ -279,6 +279,11 @@ def main() -> int:
                       timeout_s=ui_cfg.get("idle_timeout_s", 20),
                       brightness=ui_cfg.get("brightness", 70),
                       dim_level=ui_cfg.get("auto_dim_level", 10))
+            # Wardriving means glancing at the screen while driving; dimming
+            # to black after 20 s looks like the payload died. Keep it lit by
+            # default, with CONFIG -> KEEP AWAKE to opt back in.
+            if bool(ui_cfg.get("keep_awake", True)):
+                idle.get().set_enabled(False)
             pal = theme.Palette(p)
             splash.show(p, pal)
             result = App(p, pal, cfg).run()
@@ -298,6 +303,10 @@ class App:
             [],
             min_sats=cfg.get("gps", {}).get("min_sats", 4),
         )
+        # Negative = hold the last fix forever through no-fix reports;
+        # 0 = disabled; positive = grace window in seconds.
+        self.gps.state.hold_last_fix_s = float(
+            cfg.get("gps", {}).get("hold_last_fix_s", -1))
         self.gps.start()
         self.loot_dir = Path(cfg.get("storage", {}).get("loot_dir", "/mmc/root/loot/wdgwars"))
         self.loot_dir.mkdir(parents=True, exist_ok=True)
@@ -538,6 +547,9 @@ class App:
             save_config(self.cfg)
 
         gps_state = self.gps.state
+        # 0 (the default) means "never expire": a paused phone or a lull in
+        # gpsd updates must not drop every observation as no_gps.
+        gps_max_gap_s = float(self.cfg.get("gps", {}).get("max_gap_s", 0) or 0)
         hud_interval = max(0.1, int(scan_cfg.get("hud_interval_ms", 500)) / 1000.0)
         tick_ms = int(scan_cfg.get("poll_interval_ms", 150))
         # Rolling window of (monotonic, rows) so the HUD can show how fast the
@@ -553,6 +565,7 @@ class App:
                 st.gps_fix = live.fix_3d
                 st.gps_sats = live.sats
                 st.gps_accuracy = live.accuracy_m
+                st.gps_age_s = live.age_s
                 st.lat = live.lat
                 st.lon = live.lon
 
@@ -570,12 +583,12 @@ class App:
                             st.rssi_window.append(obs.rssi)
                             # Geo-tag against where we were when the frame was
                             # heard, not where we are now that it is written.
-                            if sess.add_wifi(obs, gps_state.at(obs.first_seen)):
+                            if sess.add_wifi(obs, gps_state.at(obs.first_seen, max_gap_s=gps_max_gap_s)):
                                 st.wifi_rows += 1
                     if ble:
                         for obs in ble.drain():
                             st.ble_seen += 1
-                            if sess.add_ble(obs, gps_state.at(obs.first_seen)):
+                            if sess.add_ble(obs, gps_state.at(obs.first_seen, max_gap_s=gps_max_gap_s)):
                                 st.ble_rows += 1
 
                     st.total_rows = sess.stats.rows_written
@@ -638,11 +651,11 @@ class App:
             try:
                 if wifi:
                     for obs in wifi.drain():
-                        if sess.add_wifi(obs, gps_state.at(obs.first_seen)):
+                        if sess.add_wifi(obs, gps_state.at(obs.first_seen, max_gap_s=gps_max_gap_s)):
                             st.wifi_rows += 1
                 if ble:
                     for obs in ble.drain():
-                        if sess.add_ble(obs, gps_state.at(obs.first_seen)):
+                        if sess.add_ble(obs, gps_state.at(obs.first_seen, max_gap_s=gps_max_gap_s)):
                             st.ble_rows += 1
             except Exception:
                 pass
@@ -855,6 +868,7 @@ class App:
             phone_badge = ("start" if _mobile2gps_binary()
                            else "setup" if _mobile2gps_installed()
                            else "install")
+            awake = bool(self.cfg.get("ui", {}).get("keep_awake", True))
             scan_cfg = self.cfg.get("scan", {})
             return [
                 menu.MenuItem(f"API KEY  [{masked}]", action=lambda: self._cfg_view_key()),
@@ -865,6 +879,8 @@ class App:
                 menu.MenuItem("GPS STATUS", action=lambda: self._cfg_gps_status()),
                 menu.MenuItem("PHONE GPS", action=lambda: self._cfg_phone(),
                               badge=phone_badge),
+                menu.MenuItem("KEEP AWAKE", action=lambda: self._cfg_keep_awake(),
+                              badge="on" if awake else "off"),
                 menu.MenuItem("BRIGHTNESS +", action=lambda: self._cfg_brightness(+10),
                               badge=f"{br}%"),
                 menu.MenuItem("BRIGHTNESS -", action=lambda: self._cfg_brightness(-10),
@@ -1128,6 +1144,20 @@ class App:
             dialog.alert(self.p, self.pal, "TEST FAIL",
                          f"http {res.status}\n{res.error or ''}",
                          accent=self.pal.red)
+
+    def _cfg_keep_awake(self):
+        ui = self.cfg.setdefault("ui", {})
+        new = not bool(ui.get("keep_awake", True))
+        ui["keep_awake"] = new
+        save_config(self.cfg)
+        mgr = idle.get()
+        if mgr:
+            mgr.set_enabled(not new)
+        dialog.alert(self.p, self.pal, "KEEP AWAKE",
+                     "Screen stays on." if new else
+                     f"Screen dims after {int(ui.get('idle_timeout_s', 20))}s.",
+                     accent=self.pal.green if new else self.pal.cyan)
+        return "back"
 
     def _cfg_brightness(self, delta: int):
         mgr = idle.get()

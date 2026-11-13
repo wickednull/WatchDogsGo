@@ -1,7 +1,9 @@
 {
   "api_key": "",
   "gps": {
-    "min_sats": 4
+    "min_sats": 4,
+    "max_gap_s": 0,
+    "hold_last_fix_s": -1
   },
   "scan": {
     "wifi_iface": "auto",
@@ -41,6 +43,7 @@
     "brightness": 70,
     "rotation": 270,
     "idle_timeout_s": 20,
-    "auto_dim_level": 10
+    "auto_dim_level": 10,
+    "keep_awake": true
   }
 }

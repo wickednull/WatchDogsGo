@@ -68,6 +68,10 @@ class GpsState:
     device: str = ""
     speed_mps: float = 0.0
     track_deg: float = 0.0
+    # Hold the last good fix through explicit no-fix reports (phone paused,
+    # screen locked). Negative = forever, 0 = disabled, >0 = grace seconds.
+    hold_last_fix_s: float = 0.0
+    last_fix_time: float = 0.0
 
     lock: threading.Lock = field(default_factory=threading.Lock,
                                  repr=False, compare=False)
@@ -109,6 +113,11 @@ class GpsState:
         returned and `fix_3d` is cleared once the gap exceeds *max_gap_s* — so
         a caller that refuses to write without a fix automatically refuses to
         write observations it cannot honestly place.
+
+        `max_gap_s <= 0` disables the gap check entirely: the nearest known
+        fix is always considered valid. That is the wardrive default — losing
+        every row because the phone paused for a few seconds is worse than
+        tagging a stationary sighting with the last position.
         """
         with self.lock:
             hist_t = self._hist_t
@@ -117,7 +126,9 @@ class GpsState:
                 # No history yet: trust the live fix only if it is fresh
                 # relative to the moment being asked about. `last_update` of 0
                 # means gpsd has never reported anything at all.
-                if not self.last_update or abs(t - self.last_update) > max_gap_s:
+                if not self.last_update:
+                    return _clear_fix(snap)
+                if max_gap_s > 0 and abs(t - self.last_update) > max_gap_s:
                     return _clear_fix(snap)
                 return snap
 
@@ -136,7 +147,8 @@ class GpsState:
             span = t1 - t0
             # Both ends must be real fixes for the interpolation to mean
             # anything; a gap across a fix dropout is not a straight line.
-            if span <= 0 or not p0[4] or not p1[4] or span > max_gap_s * 4:
+            if (span <= 0 or not p0[4] or not p1[4]
+                    or (max_gap_s > 0 and span > max_gap_s * 4)):
                 near = i - 1 if (t - t0) <= (t1 - t) else i
                 gap = abs(t - hist_t[near])
                 return self._at_index(near, gap, max_gap_s, interpolated=False)
@@ -160,7 +172,7 @@ class GpsState:
         """Build a snapshot from history slot *i*. Caller holds the lock."""
         lat, lon, alt, acc, had_fix = self._hist_p[i]
         snap = GpsSnapshot(
-            fix_3d=bool(had_fix) and gap <= max_gap_s,
+            fix_3d=bool(had_fix) and (max_gap_s <= 0 or gap <= max_gap_s),
             fix_quality=self.fix_quality,
             lat=lat, lon=lon, alt_m=alt, accuracy_m=acc,
             sats=self.sats, utc_iso=self.utc_iso,
@@ -328,9 +340,10 @@ class GpsReader:
             with self.state.lock:
                 if path:
                     self.state.device = path
-                self.state.last_update = now
 
                 if mode >= 2 and lat is not None and lon is not None:
+                    self.state.last_update = now
+                    self.state.last_fix_time = now
                     self.state.lat = float(lat)
                     self.state.lon = float(lon)
                     self.state.alt_m = float(alt) if alt is not None else 0.0
@@ -353,15 +366,36 @@ class GpsReader:
                                        self.state.alt_m, self.state.accuracy_m,
                                        self.state.fix_3d)
                 else:
-                    self.state.fix_quality = 0
-                    self.state.fix_3d = False
-                    self.state.speed_mps = 0.0
-                    # Record the dropout so `at()` will not interpolate a
-                    # straight line across it. lat/lon stay at their last
-                    # known values for display only — never for writing.
-                    self.state._record(now, self.state.lat, self.state.lon,
-                                       self.state.alt_m, self.state.accuracy_m,
-                                       False)
+                    # A phone that locks its screen stops sending valid
+                    # GPRMC, and Mobile2GPS then emits an explicit no-fix
+                    # sentence. A negative hold keeps the last good position
+                    # forever; a positive value is a grace window. Without
+                    # this a momentary pause ended the wardrive ("GPS timed
+                    # out").
+                    hold = self.state.hold_last_fix_s
+                    held = (self.state.last_fix_time > 0 and
+                            (hold < 0 or
+                             (hold > 0 and
+                              now - self.state.last_fix_time <= hold)))
+                    if held:
+                        self.state.fix_3d = True
+                        # Record a flat sample so `at()` sees no hole. Keep
+                        # last_update at the real fix time so `age_s` keeps
+                        # growing and GPS STATUS shows how stale it is.
+                        self.state._record(now, self.state.lat, self.state.lon,
+                                           self.state.alt_m,
+                                           self.state.accuracy_m, True)
+                    else:
+                        self.state.last_update = now
+                        self.state.fix_quality = 0
+                        self.state.fix_3d = False
+                        self.state.speed_mps = 0.0
+                        # Record the dropout so `at()` will not interpolate a
+                        # straight line across it. lat/lon stay at their last
+                        # known values for display only — never for writing.
+                        self.state._record(now, self.state.lat, self.state.lon,
+                                           self.state.alt_m,
+                                           self.state.accuracy_m, False)
 
         elif cls == "SKY":
             # SKY = satellite constellation report
