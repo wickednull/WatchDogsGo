@@ -3,6 +3,16 @@
 # Requires: /root/payloads/user/reconnaissance/wdgwars/wdgwars.py
 
 TARGET="/root/payloads/user/reconnaissance/wdgwars"
+# Fall back to any installed wdgwars payload dir (versioned/renamed installs).
+if [ ! -f "$TARGET/wdgwars.py" ]; then
+    for _cand in /root/payloads/user/reconnaissance/*/wdgwars.py \
+                 /mmc/root/payloads/user/reconnaissance/*/wdgwars.py; do
+        if [ -f "$_cand" ]; then
+            TARGET="$(dirname "$_cand")"
+            break
+        fi
+    done
+fi
 [ ! -f "$TARGET/wdgwars.py" ] && echo "WDGoWars not installed" && exit 1
 
 export PATH="/mmc/usr/bin:$PATH"

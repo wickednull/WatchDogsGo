@@ -10,15 +10,35 @@
 
 PAYLOAD_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB="$PAYLOAD_DIR/lib"
-WIFMAN_LIB="/root/payloads/user/reconnaissance/wifman/lib"
+WIFMAN_DIR="/root/payloads/user/reconnaissance/wifman"
+WIFMAN_LIB="$WIFMAN_DIR/lib"
 
 mkdir -p "$LIB"
 
 echo "[bootstrap] pagerctl bindings"
-if [ -f "$WIFMAN_LIB/pagerctl.py" ] && [ -f "$WIFMAN_LIB/libpagerctl.so" ]; then
-    cp "$WIFMAN_LIB/pagerctl.py"    "$LIB/"
-    cp "$WIFMAN_LIB/libpagerctl.so" "$LIB/"
-    echo "  copied from $WIFMAN_LIB"
+# Look for an existing pagerctl pair anywhere a payload install keeps it.
+# pagerctl.py loads libpagerctl.so from its own directory, so we need a dir
+# that holds both files.
+SRC_LIB=""
+for d in "$LIB" \
+         "$PAYLOAD_DIR" \
+         "$WIFMAN_LIB" \
+         "$WIFMAN_DIR" \
+         /mmc/usr/lib \
+         /mmc/root/payloads/user/reconnaissance/*/lib \
+         /root/payloads/user/reconnaissance/*/lib \
+         /root/payloads/user/*/*/lib \
+         /usr/local/lib /usr/lib; do
+    if [ -f "$d/pagerctl.py" ] && [ -f "$d/libpagerctl.so" ]; then
+        SRC_LIB="$d"
+        break
+    fi
+done
+
+if [ -n "$SRC_LIB" ]; then
+    cp -f "$SRC_LIB/pagerctl.py"    "$LIB/"
+    cp -f "$SRC_LIB/libpagerctl.so" "$LIB/"
+    echo "  copied from $SRC_LIB"
 else
     WIFMAN_BASE="https://raw.githubusercontent.com/LOCOSP/pineapple_pager_wifman/main/wifman/lib"
     for f in pagerctl.py libpagerctl.so; do
@@ -42,6 +62,8 @@ mkdir -p /mmc/root/loot/wdgwars/sessions
 
 chmod +x "$PAYLOAD_DIR/payload.sh" 2>/dev/null
 chmod +x "$PAYLOAD_DIR"/launch_*.sh 2>/dev/null
+# The outgoing launcher is advertised in the app menu too, so it needs its bit.
+chmod +x "$PAYLOAD_DIR"/launchers/*.sh 2>/dev/null
 
 # Push the reverse launcher (launch_wdgwars.sh) into every installed peer
 # payload so they can JUMP TO WDGoWars. Skips peers that aren't installed.

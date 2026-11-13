@@ -6,7 +6,18 @@
 # Category: Reconnaissance
 # Library: libpagerctl.so (pagerctl)
 
-PAYLOAD_DIR="/root/payloads/user/reconnaissance/wdgwars"
+PAYLOAD_DIR_DEFAULT="/root/payloads/user/reconnaissance/wdgwars"
+# Resolve the install dir from this script's own location first. Payloads are
+# frequently installed under a versioned/renamed folder (wdgwars-1.2.4, etc.);
+# hardcoding the canonical path made bootstrap.sh populate lib/ in the real
+# directory while payload.sh looked somewhere else and cried "missing".
+_SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ -n "$_SCRIPT_DIR" ] && [ -f "$_SCRIPT_DIR/payload.sh" ]; then
+    PAYLOAD_DIR="$_SCRIPT_DIR"
+else
+    PAYLOAD_DIR="${WDGWARS_PAYLOAD_DIR:-$PAYLOAD_DIR_DEFAULT}"
+fi
+
 WIFMAN_DIR="/root/payloads/user/reconnaissance/wifman"
 DATA_DIR="$PAYLOAD_DIR/data"
 NEXT_PAYLOAD_FILE="$DATA_DIR/.next_payload"
@@ -35,25 +46,77 @@ trap cleanup EXIT
 # DEPENDENCIES — check, auto-copy pagerctl, opkg-install python
 # ============================================================
 
-# pagerctl: prefer payload's own lib/, else copy from installed wifman, else
-# bail out with clear instructions. Never reaches opkg because these files
-# don't live in any opkg feed.
-if [ ! -f "$PAYLOAD_DIR/lib/libpagerctl.so" ] || [ ! -f "$PAYLOAD_DIR/lib/pagerctl.py" ]; then
-    if [ -f "$WIFMAN_DIR/lib/libpagerctl.so" ] && [ -f "$WIFMAN_DIR/lib/pagerctl.py" ]; then
-        mkdir -p "$PAYLOAD_DIR/lib"
-        cp "$WIFMAN_DIR/lib/libpagerctl.so" "$PAYLOAD_DIR/lib/"
-        cp "$WIFMAN_DIR/lib/pagerctl.py"     "$PAYLOAD_DIR/lib/"
-        LOG "cyan" "pagerctl auto-copied from wifman"
+# pagerctl: the Python wrapper loads libpagerctl.so from its OWN directory
+# (see pagerctl.py `_lib_paths`), so the pair must sit side by side.
+# Search everywhere a payload install realistically keeps it instead of
+# trusting two hardcoded paths, and adopt the first complete pair we find.
+PAGERCTL_CANDIDATES=(
+    "$PAYLOAD_DIR/lib"
+    "$PAYLOAD_DIR"
+    "$WIFMAN_DIR/lib"
+    "$WIFMAN_DIR"
+    /mmc/usr/lib
+    /usr/local/lib
+    /usr/lib
+)
+
+# Peer payload lib dirs (wifman/loki/pagergotchi/bjorn and friends). Globbed
+# out here on purpose: a quoted pattern inside an array never expands.
+for _pattern in \
+    /mmc/root/payloads/user/reconnaissance/*/lib \
+    /root/payloads/user/reconnaissance/*/lib \
+    /root/payloads/user/*/*/lib \
+    /root/payloads/*/lib
+do
+    [ -d "$_pattern" ] && PAGERCTL_CANDIDATES+=("$_pattern")
+done
+
+PAGERCTL_SRC=""
+FOUND_PY=""
+FOUND_SO=""
+for _dir in "${PAGERCTL_CANDIDATES[@]}"; do
+    [ -z "$FOUND_PY" ] && [ -f "$_dir/pagerctl.py" ] && FOUND_PY="$_dir/pagerctl.py"
+    [ -z "$FOUND_SO" ] && [ -f "$_dir/libpagerctl.so" ] && FOUND_SO="$_dir/libpagerctl.so"
+    if [ -z "$PAGERCTL_SRC" ] && [ -f "$_dir/pagerctl.py" ] && [ -f "$_dir/libpagerctl.so" ]; then
+        PAGERCTL_SRC="$_dir"
+    fi
+done
+
+if [ -n "$PAGERCTL_SRC" ] && [ "$PAGERCTL_SRC" != "$PAYLOAD_DIR/lib" ]; then
+    mkdir -p "$PAYLOAD_DIR/lib" 2>/dev/null
+    cp -f "$PAGERCTL_SRC/pagerctl.py"    "$PAYLOAD_DIR/lib/" 2>/dev/null
+    cp -f "$PAGERCTL_SRC/libpagerctl.so" "$PAYLOAD_DIR/lib/" 2>/dev/null
+    if [ -f "$PAYLOAD_DIR/lib/pagerctl.py" ] && [ -f "$PAYLOAD_DIR/lib/libpagerctl.so" ]; then
+        LOG "cyan" "pagerctl auto-copied from $PAGERCTL_SRC"
     else
+        # Read-only payload dir: import straight from where it was found.
+        export PYTHONPATH="$PAGERCTL_SRC:$PYTHONPATH"
+        LOG "cyan" "pagerctl found in $PAGERCTL_SRC (using in place)"
+    fi
+fi
+
+if [ ! -f "$PAYLOAD_DIR/lib/pagerctl.py" ] || [ ! -f "$PAYLOAD_DIR/lib/libpagerctl.so" ]; then
+    if [ -z "$PAGERCTL_SRC" ]; then
         LOG ""
         LOG "red" "=== MISSING DEPENDENCY: pagerctl ==="
         LOG ""
-        LOG "libpagerctl.so / pagerctl.py not found in:"
-        LOG "  $PAYLOAD_DIR/lib/"
-        LOG "  $WIFMAN_DIR/lib/"
+        LOG "Expected pagerctl.py + libpagerctl.so side by side in one of:"
+        for _dir in "${PAGERCTL_CANDIDATES[@]}"; do
+            LOG "  $_dir"
+        done
         LOG ""
-        LOG "Install the wifman payload first, or drop"
-        LOG "pagerctl.py + libpagerctl.so into $PAYLOAD_DIR/lib/."
+        LOG "Searched result:"
+        LOG "  pagerctl.py    : ${FOUND_PY:-not found}"
+        LOG "  libpagerctl.so : ${FOUND_SO:-not found}"
+        LOG ""
+        if [ -n "$FOUND_PY" ] || [ -n "$FOUND_SO" ]; then
+            LOG "Both files must be in the SAME directory - pagerctl.py"
+            LOG "loads libpagerctl.so from its own folder."
+            LOG "Copy the missing one next to the other."
+        else
+            LOG "Install the wifman payload first, or drop"
+            LOG "pagerctl.py + libpagerctl.so into $PAYLOAD_DIR/lib/."
+        fi
         LOG ""
         LOG "Press any button to exit..."
         WAIT_FOR_INPUT >/dev/null 2>&1
