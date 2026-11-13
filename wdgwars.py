@@ -295,8 +295,7 @@ class App:
         self.pal = pal
         self.cfg = cfg
         self.gps = GpsReader(
-            cfg.get("gps", {}).get("devices", ["/dev/ttyACM0"]),
-            baud=cfg.get("gps", {}).get("baud", 9600),
+            [],
             min_sats=cfg.get("gps", {}).get("min_sats", 4),
         )
         self.gps.start()
@@ -851,10 +850,6 @@ class App:
             br = mgr.brightness if mgr else self.cfg.get("ui", {}).get("brightness", 70)
             it_s = int(mgr.timeout) if mgr else self.cfg.get("ui", {}).get("idle_timeout_s", 20)
             dim = mgr.dim_level if mgr else self.cfg.get("ui", {}).get("auto_dim_level", 10)
-            gps_cfg = self.cfg.get("gps", {})
-            gps_devs = gps_cfg.get("devices", [])
-            gps_current = gps_devs[0] if gps_devs else "AUTO"
-            gps_baud = gps_cfg.get("baud", 9600)
             phone_badge = ("start" if _mobile2gps_binary()
                            else "setup" if _mobile2gps_installed()
                            else "install")
@@ -865,10 +860,7 @@ class App:
                 menu.MenuItem("TEST CONNECTION", action=lambda: self._cfg_test()),
                 menu.MenuItem("SCAN SETUP", action=lambda: self._cfg_scan(),
                               badge=str(scan_cfg.get("wifi_iface", "auto"))),
-                menu.MenuItem("GPS DEVICE", action=lambda: self._cfg_gps_device(),
-                              badge=gps_current.replace("/dev/", "")),
-                menu.MenuItem("GPS BAUD", action=lambda: self._cfg_gps_baud(),
-                              badge=str(gps_baud)),
+                menu.MenuItem("GPS STATUS", action=lambda: self._cfg_gps_status()),
                 menu.MenuItem("PHONE GPS", action=lambda: self._cfg_phone(),
                               badge=phone_badge),
                 menu.MenuItem("BRIGHTNESS +", action=lambda: self._cfg_brightness(+10),
@@ -983,57 +975,28 @@ class App:
         sc[key] = max(lo, min(hi, cur + delta))
         save_config(self.cfg)
 
-    def _cfg_gps_device(self):
-        """Pick a specific /dev/ttyACM* or /dev/ttyUSB* (or AUTO). Saves
-        choice to config and hot-restarts the GPS reader so the new device
-        takes effect without restarting the payload.
+    def _cfg_gps_status(self):
+        """Live gpsd state.
 
-        With phone GPS the device is the virtual serial port Mobile2GPS
-        creates for gpsd; AUTO lets gpsd pick it up either way.
+        Device and baud belong to the Pager's own Settings > GPS (or
+        GPS_CONFIGURE); gpsd owns the serial port, so this app never sets it.
         """
-        import glob as _glob
-        present = sorted(_glob.glob("/dev/ttyACM*") + _glob.glob("/dev/ttyUSB*"))
-        if not present:
-            dialog.alert(self.p, self.pal, "GPS",
-                         "No ttyACM / ttyUSB devices.\n\n"
-                         "Dongle: plug in the GPS.\n"
-                         "Phone: start Mobile2GPS first.",
-                         accent=self.pal.amber)
-            return
-        items = [menu.MenuItem("AUTO", action=lambda: self._set_gps_device(None))]
-        for d in present:
-            items.append(menu.MenuItem(d, action=lambda dev=d: self._set_gps_device(dev)))
-        items.append(menu.MenuItem("BACK", action=lambda: "back"))
-        menu.run(self.p, self.pal, "GPS DEVICE", items)
-
-    def _set_gps_device(self, dev):
-        gps_cfg = self.cfg.setdefault("gps", {})
-        if dev is None:
-            gps_cfg["devices"] = []
-            label = "AUTO"
-        else:
-            # Keep the chosen device first; retain others as fallback order.
-            others = [d for d in gps_cfg.get("devices", []) if d != dev]
-            gps_cfg["devices"] = [dev] + others
-            label = dev
-        save_config(self.cfg)
-        self._restart_gps()
-        dialog.alert(self.p, self.pal, "GPS DEVICE",
-                     f"Set to:\n{label}\n\nRe-locking...",
-                     accent=self.pal.cyan)
+        s = self.gps.state.snapshot()
+        fq = {0: "no fix", 1: "no fix", 2: "2D", 3: "3D"}.get(
+            s.fix_quality, f"mode {s.fix_quality}")
+        sats = str(s.sats) if s.sats else "n/a"
+        acc = f"{s.accuracy_m:.0f}m" if s.accuracy_m else "n/a"
+        phone = _mobile2gps_url().replace("https://", "")
+        dialog.alert(
+            self.p, self.pal, "GPS STATUS",
+            f"dev: {s.device or 'n/a'}\n"
+            f"mode: {fq}   age: {s.age_s:.0f}s\n"
+            f"sats: {sats}   acc: {acc}\n"
+            f"{s.lat:.5f}, {s.lon:.5f}\n"
+            f"phone: {phone}",
+            accent=self.pal.green if s.fix_3d else self.pal.amber,
+        )
         return "back"
-
-    def _cfg_gps_baud(self):
-        choices = [4800, 9600, 19200, 38400, 57600, 115200]
-        cur = self.cfg.get("gps", {}).get("baud", 9600)
-        try:
-            idx = choices.index(cur)
-        except ValueError:
-            idx = 1
-        new = choices[(idx + 1) % len(choices)]
-        self.cfg.setdefault("gps", {})["baud"] = new
-        save_config(self.cfg)
-        self._restart_gps()
 
     def _cfg_phone(self):
         """Phone-as-GPS, handled by the Mobile2GPS payload.
@@ -1060,9 +1023,8 @@ class App:
             if installed:
                 msg = ("Mobile2GPS is installed but\n"
                        "its server binary is missing.\n\n"
-                       "Run its payload once (menu\n"
-                       "or `sh payload.sh` in its dir)\n"
-                       "to download it.")
+                       "Run Mobile2GPS once from the\n"
+                       "Pager menu to download it.")
             else:
                 msg = ("Mobile2GPS not found.\n\n"
                        "Install from\n"
@@ -1104,19 +1066,6 @@ class App:
                      "press Start.",
                      accent=self.pal.cyan)
         return "back"
-
-    def _restart_gps(self):
-        try:
-            self.gps.stop()
-        except Exception:
-            pass
-        gps_cfg = self.cfg.get("gps", {})
-        self.gps = GpsReader(
-            gps_cfg.get("devices", []) or [],
-            baud=gps_cfg.get("baud", 9600),
-            min_sats=gps_cfg.get("min_sats", 4),
-        )
-        self.gps.start()
 
     def _cfg_view_key(self):
         cur = self.cfg.get("api_key", "")

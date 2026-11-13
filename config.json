@@ -1,14 +1,20 @@
 {
   "api_key": "",
   "gps": {
-    "devices": ["/dev/ttyACM3", "/dev/ttyACM2", "/dev/ttyACM1", "/dev/ttyACM0", "/dev/ttyUSB0"],
-    "baud": 9600,
-    "min_sats": 4,
-    "fix_timeout_s": 90
+    "min_sats": 4
   },
   "scan": {
     "wifi_iface": "auto",
-    "band_plan": ["2g", "5g_fast", "2g", "5g_dfs", "2g", "5g_fast", "2g", "6g_psc"],
+    "band_plan": [
+      "2g",
+      "5g_fast",
+      "2g",
+      "5g_dfs",
+      "2g",
+      "5g_fast",
+      "2g",
+      "6g_psc"
+    ],
     "wifi_interval_s": 0,
     "flush_bss_cache": true,
     "monitor_hop": true,
@@ -33,7 +39,6 @@
   "ui": {
     "brightness": 70,
     "rotation": 270,
-    "font": "fonts/cyber.ttf",
     "idle_timeout_s": 20,
     "auto_dim_level": 10
   }
