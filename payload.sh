@@ -2,7 +2,7 @@
 # Title: WDGoWars Wardriver
 # Description: WiFi + BLE wardriver for wdgwars.pl (offline-first, GPS required)
 # Author: wickednull (fork of LOCOSP's original WDGoWars)
-# Version: 1.2.4
+# Version: 1.3.0
 # Category: Reconnaissance
 # Library: libpagerctl.so (pagerctl)
 
@@ -181,13 +181,15 @@ if [ "$NEED_PY" = true ] || [ "$NEED_CTYPES" = true ]; then
 fi
 
 # Soft deps — warn once but don't block. WiFi scan needs `iw`, BLE needs
-# `bluetoothctl`, the phone-GPS bridge needs `openssl` (self-signed cert).
+# `bluetoothctl`, GPS comes from gpsd (dongle or the Mobile2GPS phone link).
 SOFT_WARN=""
 command -v iw >/dev/null 2>&1 || SOFT_WARN="$SOFT_WARN iw"
 command -v bluetoothctl >/dev/null 2>&1 || SOFT_WARN="$SOFT_WARN bluetoothctl"
 # tcpdump backs the monitor-mode capture path; without it we fall back to iw scan.
 command -v tcpdump >/dev/null 2>&1 || SOFT_WARN="$SOFT_WARN tcpdump-mini"
-command -v openssl >/dev/null 2>&1 || SOFT_WARN="$SOFT_WARN openssl-util"
+command -v gpsd >/dev/null 2>&1 || SOFT_WARN="$SOFT_WARN gpsd"
+# Only needed for a USB dongle; phone GPS uses Mobile2GPS's virtual port.
+[ -e /sys/module/cdc_acm ] || SOFT_WARN="$SOFT_WARN kmod-usb-acm"
 if [ -n "$SOFT_WARN" ]; then
     LOG "yellow" "Optional deps missing:$SOFT_WARN"
     LOG "         Install with: opkg install$SOFT_WARN"
@@ -209,6 +211,9 @@ LOG "magenta" "by wickednull  ·  orig. LOCOSP"
 LOG ""
 LOG "WiFi + BLE wardriver for wdgwars.pl"
 LOG "Offline-first  ::  GPS required"
+LOG ""
+LOG "GPS: USB dongle, or phone via"
+LOG "the Mobile2GPS payload."
 LOG ""
 LOG "green" "GREEN = Start"
 LOG "red"   "RED   = Exit"
@@ -242,6 +247,9 @@ for _peer in wifman.py loki_menu.py run_pagergotchi.py Bjorn.py bjorn_menu.py; d
 done
 sleep 0.2
 
+# Fresh error log per launch so the exit handler shows this run's traceback.
+: > /tmp/wdgwars.err
+
 while true; do
     cd "$PAYLOAD_DIR"
     python3 wdgwars.py 2>>/tmp/wdgwars.err
@@ -265,6 +273,19 @@ while true; do
             sh "$NEXT_SCRIPT"
             [ $? -eq 42 ] && continue
         fi
+    fi
+
+    # Expose the Python traceback instead of silently dropping the user back
+    # to the Pager — a startup ImportError is otherwise invisible.
+    if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 42 ]; then
+        LOG ""
+        LOG "red" "WDGoWars exited (code $EXIT_CODE). Last log lines:"
+        tail -n 8 /tmp/wdgwars.err 2>/dev/null | while IFS= read -r _line; do
+            LOG "  $_line"
+        done
+        LOG ""
+        LOG "Press any button to return..."
+        WAIT_FOR_INPUT >/dev/null 2>&1
     fi
     break
 done

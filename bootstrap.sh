@@ -52,7 +52,7 @@ fi
 
 echo "[bootstrap] opkg runtime packages (best-effort, needs internet)"
 opkg update >/dev/null 2>&1 || true
-for pkg in iw bluez-utils openssl-util tcpdump-mini; do
+for pkg in iw bluez-utils kmod-usb-acm gpsd gpsd-clients tcpdump-mini; do
     opkg list-installed 2>/dev/null | grep -q "^$pkg " \
         || opkg install "$pkg" >/dev/null 2>&1 \
         || echo "  warn: could not install $pkg"
@@ -83,3 +83,6 @@ else
 fi
 
 echo "[bootstrap] done"
+echo "[bootstrap] GPS: plug in a USB dongle, or install the Mobile2GPS"
+echo "            payload (Pager Portal > Get Payloads > general) for"
+echo "            phone GPS. WDGoWars then reads gpsd either way."

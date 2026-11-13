@@ -6,6 +6,8 @@ Boot sequence: load config -> init Pager -> splash -> main menu loop.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -23,7 +25,7 @@ from ui import theme, splash, menu, dialog, status as hud, keyboard, idle  # noq
 from scanners.wifi import WifiScanner, DEFAULT_PLAN  # noqa: E402
 from scanners.monitor import MonitorScanner  # noqa: E402
 from scanners.ble import BleScanner  # noqa: E402
-from scanners.phone_gps import PhoneGpsReader, show_pairing  # noqa: E402
+from scanners.gps import GpsReader  # noqa: E402
 from scanners.iface import (
     bring_up, list_interfaces, management_phys, pick_wifi_source,
     unsafe_reason,
@@ -49,6 +51,36 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+# Phone-as-GPS is delegated to the Mobile2GPS payload: it serves the phone
+# page and feeds gpsd, and this app only reads gpsd. Running a second HTTPS
+# bridge here duplicated that and pulled in python3-openssl/python3-urllib,
+# which this payload does not install.
+MOBILE2GPS_BINARIES = (
+    "/root/payloads/user/general/Mobile2GPS/Mobile2GPS",
+    "/mmc/root/payloads/user/general/Mobile2GPS/Mobile2GPS",
+)
+MOBILE2GPS_URL = "https://172.16.52.1:1993"
+
+
+def _mobile2gps_binary() -> str | None:
+    for path in MOBILE2GPS_BINARIES:
+        if os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _mobile2gps_running() -> bool:
+    for tool in ("pidof", "pgrep"):
+        try:
+            return subprocess.run([tool, "Mobile2GPS"],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL,
+                                  timeout=2).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
 
 
 def main() -> int:
@@ -86,17 +118,12 @@ class App:
         self.p = p
         self.pal = pal
         self.cfg = cfg
-        self.gps = PhoneGpsReader(
-            port=cfg.get("gps", {}).get("port", 1993),
-            host=cfg.get("gps", {}).get("host", ""),
-            max_accuracy_m=cfg.get("gps", {}).get("max_accuracy_m", 100),
-            fix_timeout_s=cfg.get("gps", {}).get("fix_timeout_s", 90),
+        self.gps = GpsReader(
+            cfg.get("gps", {}).get("devices", ["/dev/ttyACM0"]),
+            baud=cfg.get("gps", {}).get("baud", 9600),
+            min_sats=cfg.get("gps", {}).get("min_sats", 4),
         )
-        self._gps_start_error = ""
-        try:
-            self.gps.start()
-        except Exception as e:  # port busy / no openssl / no `ip`
-            self._gps_start_error = str(e) or e.__class__.__name__
+        self.gps.start()
         self.loot_dir = Path(cfg.get("storage", {}).get("loot_dir", "/mmc/root/loot/wdgwars"))
         self.loot_dir.mkdir(parents=True, exist_ok=True)
         (self.loot_dir / "sessions").mkdir(exist_ok=True)
@@ -192,16 +219,27 @@ class App:
     def _wait_for_gps(self) -> bool:
         if self.gps.state.snapshot().fix_3d:
             return True
-        if self._gps_start_error:
-            dialog.alert(self.p, self.pal, "GPS ERROR",
-                         f"Phone bridge failed:\n{self._gps_start_error}\n\n"
-                         "Check CONFIG -> PHONE GPS.",
-                         accent=self.pal.red)
-            return False
-        # No phone feed yet — show the QR + URL and wait for the first
-        # fix. show_pairing returns True once a fresh fix lands and False when
-        # the user presses B.
-        ok = show_pairing(self.p, self.pal, self.gps)
+
+        def live_msg() -> str:
+            s = self.gps.state.snapshot()
+            dev = s.device or "(no device)"
+            fq_label = {0: "no fix", 1: "GPS", 2: "DGPS", 4: "RTK fix", 5: "RTK float"}.get(
+                s.fix_quality, f"fq{s.fix_quality}")
+            return (f"Waiting for GPS fix.\n"
+                    f"dev: {dev}\n"
+                    f"sats: {s.sats}   {fq_label}\n"
+                    f"need >= {self.gps.min_sats} sats + 3D fix\n"
+                    f"\nphone: CONFIG > PHONE GPS\n"
+                    f"B to cancel")
+
+        ok = dialog.wait_with(
+            self.p, self.pal,
+            title="GPS",
+            message="",
+            poll=lambda: self.gps.state.snapshot().fix_3d,
+            timeout_ms=0,
+            live_message=live_msg,
+        )
         if not ok:
             dialog.alert(self.p, self.pal, "GPS",
                          "Scan aborted.\nNo fix yet.", accent=self.pal.amber)
@@ -637,9 +675,10 @@ class App:
             it_s = int(mgr.timeout) if mgr else self.cfg.get("ui", {}).get("idle_timeout_s", 20)
             dim = mgr.dim_level if mgr else self.cfg.get("ui", {}).get("auto_dim_level", 10)
             gps_cfg = self.cfg.get("gps", {})
-            gps_ip = self.gps.ip or gps_cfg.get("host", "?")
-            gps_port = gps_cfg.get("port", 1993)
-            gps_acc = gps_cfg.get("max_accuracy_m", 100)
+            gps_devs = gps_cfg.get("devices", [])
+            gps_current = gps_devs[0] if gps_devs else "AUTO"
+            gps_baud = gps_cfg.get("baud", 9600)
+            phone_badge = "start" if _mobile2gps_binary() else "install"
             scan_cfg = self.cfg.get("scan", {})
             return [
                 menu.MenuItem(f"API KEY  [{masked}]", action=lambda: self._cfg_view_key()),
@@ -647,12 +686,12 @@ class App:
                 menu.MenuItem("TEST CONNECTION", action=lambda: self._cfg_test()),
                 menu.MenuItem("SCAN SETUP", action=lambda: self._cfg_scan(),
                               badge=str(scan_cfg.get("wifi_iface", "auto"))),
+                menu.MenuItem("GPS DEVICE", action=lambda: self._cfg_gps_device(),
+                              badge=gps_current.replace("/dev/", "")),
+                menu.MenuItem("GPS BAUD", action=lambda: self._cfg_gps_baud(),
+                              badge=str(gps_baud)),
                 menu.MenuItem("PHONE GPS", action=lambda: self._cfg_phone(),
-                              badge=f"{gps_ip}:{gps_port}"),
-                menu.MenuItem("MAX ACCFIX +", action=lambda: self._cfg_acc(+10),
-                              badge=f"{gps_acc:.0f}m"),
-                menu.MenuItem("MAX ACCFIX -", action=lambda: self._cfg_acc(-10),
-                              badge=f"{gps_acc:.0f}m"),
+                              badge=phone_badge),
                 menu.MenuItem("BRIGHTNESS +", action=lambda: self._cfg_brightness(+10),
                               badge=f"{br}%"),
                 menu.MenuItem("BRIGHTNESS -", action=lambda: self._cfg_brightness(-10),
@@ -765,18 +804,109 @@ class App:
         sc[key] = max(lo, min(hi, cur + delta))
         save_config(self.cfg)
 
-    def _cfg_phone(self):
-        """Re-show the QR pairing screen (useful if the phone lost the page
-        or the user wants to re-check the URL / IP)."""
-        show_pairing(self.p, self.pal, self.gps)
-        return "back"
+    def _cfg_gps_device(self):
+        """Pick a specific /dev/ttyACM* or /dev/ttyUSB* (or AUTO). Saves
+        choice to config and hot-restarts the GPS reader so the new device
+        takes effect without restarting the payload.
 
-    def _cfg_acc(self, delta):
-        cur = self.cfg.setdefault("gps", {}).get("max_accuracy_m", 100)
-        new = max(10, min(200, cur + delta))
-        self.cfg["gps"]["max_accuracy_m"] = new
+        With phone GPS the device is the virtual serial port Mobile2GPS
+        creates for gpsd; AUTO lets gpsd pick it up either way.
+        """
+        import glob as _glob
+        present = sorted(_glob.glob("/dev/ttyACM*") + _glob.glob("/dev/ttyUSB*"))
+        if not present:
+            dialog.alert(self.p, self.pal, "GPS",
+                         "No ttyACM / ttyUSB devices.\n\n"
+                         "Dongle: plug in the GPS.\n"
+                         "Phone: start Mobile2GPS first.",
+                         accent=self.pal.amber)
+            return
+        items = [menu.MenuItem("AUTO", action=lambda: self._set_gps_device(None))]
+        for d in present:
+            items.append(menu.MenuItem(d, action=lambda dev=d: self._set_gps_device(dev)))
+        items.append(menu.MenuItem("BACK", action=lambda: "back"))
+        menu.run(self.p, self.pal, "GPS DEVICE", items)
+
+    def _set_gps_device(self, dev):
+        gps_cfg = self.cfg.setdefault("gps", {})
+        if dev is None:
+            gps_cfg["devices"] = []
+            label = "AUTO"
+        else:
+            # Keep the chosen device first; retain others as fallback order.
+            others = [d for d in gps_cfg.get("devices", []) if d != dev]
+            gps_cfg["devices"] = [dev] + others
+            label = dev
         save_config(self.cfg)
         self._restart_gps()
+        dialog.alert(self.p, self.pal, "GPS DEVICE",
+                     f"Set to:\n{label}\n\nRe-locking...",
+                     accent=self.pal.cyan)
+        return "back"
+
+    def _cfg_gps_baud(self):
+        choices = [4800, 9600, 19200, 38400, 57600, 115200]
+        cur = self.cfg.get("gps", {}).get("baud", 9600)
+        try:
+            idx = choices.index(cur)
+        except ValueError:
+            idx = 1
+        new = choices[(idx + 1) % len(choices)]
+        self.cfg.setdefault("gps", {})["baud"] = new
+        save_config(self.cfg)
+        self._restart_gps()
+
+    def _cfg_phone(self):
+        """Phone-as-GPS, handled by the Mobile2GPS payload.
+
+        Mobile2GPS serves the phone page and feeds gpsd through the Pager's
+        GPS_CONFIGURE helper, so all this app does is start it and show the
+        pairing URL. Keeping the bridge out of here means no second HTTPS
+        server, no port 1993 conflict, and no python3-openssl dependency.
+        """
+        if _mobile2gps_running():
+            dialog.alert(self.p, self.pal, "PHONE GPS",
+                         "Mobile2GPS is running.\n\n"
+                         "1. Join the Management AP\n"
+                         "2. Open this URL on the phone:\n"
+                         f"   {MOBILE2GPS_URL}\n"
+                         "3. Accept the certificate warning\n"
+                         "4. Press Start and allow location\n\n"
+                         "Keep the page in the foreground.",
+                         accent=self.pal.green)
+            return "back"
+
+        binary = _mobile2gps_binary()
+        if not binary:
+            dialog.alert(self.p, self.pal, "PHONE GPS",
+                         "Mobile2GPS is not installed.\n\n"
+                         "Pager Portal > Payloads >\n"
+                         "Get Payloads > User Payloads >\n"
+                         "general > Mobile2GPS\n\n"
+                         "Requires Pager firmware 2.0.0+.",
+                         accent=self.pal.amber)
+            return "back"
+
+        if not dialog.confirm(self.p, self.pal, "PHONE GPS",
+                              "Start the Mobile2GPS server\nnow?"):
+            return "back"
+        try:
+            subprocess.Popen([binary], cwd=os.path.dirname(binary),
+                             stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as e:
+            dialog.alert(self.p, self.pal, "PHONE GPS",
+                         f"Could not start:\n{e}", accent=self.pal.red)
+            return "back"
+        dialog.alert(self.p, self.pal, "PHONE GPS",
+                     "Server starting.\n\n"
+                     "Join the Management AP, then open\n"
+                     f"{MOBILE2GPS_URL}\n\n"
+                     "Accept the certificate warning\n"
+                     "and press Start on the page.",
+                     accent=self.pal.cyan)
         return "back"
 
     def _restart_gps(self):
@@ -785,17 +915,12 @@ class App:
         except Exception:
             pass
         gps_cfg = self.cfg.get("gps", {})
-        self.gps = PhoneGpsReader(
-            port=gps_cfg.get("port", 1993),
-            host=gps_cfg.get("host", ""),
-            max_accuracy_m=gps_cfg.get("max_accuracy_m", 100),
-            fix_timeout_s=gps_cfg.get("fix_timeout_s", 90),
+        self.gps = GpsReader(
+            gps_cfg.get("devices", []) or [],
+            baud=gps_cfg.get("baud", 9600),
+            min_sats=gps_cfg.get("min_sats", 4),
         )
-        self._gps_start_error = ""
-        try:
-            self.gps.start()
-        except Exception as e:
-            self._gps_start_error = str(e) or e.__class__.__name__
+        self.gps.start()
 
     def _cfg_view_key(self):
         cur = self.cfg.get("api_key", "")
