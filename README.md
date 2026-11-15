@@ -1,4 +1,5 @@
 # WDGoWars Wardriver — WiFi Pineapple Pager payload
+<img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/b96c38aa-d8ea-4826-b5db-4de867096e0b" />
 
 Fork of [LOCOSP's WDGoWars](https://github.com/LOCOSP/pineapple_pager_wdgwars),
 turning a [Hak5 WiFi Pineapple Pager](https://docs.hak5.org/wifi-pineapple-pager/)
